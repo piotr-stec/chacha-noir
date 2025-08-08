@@ -1,0 +1,7 @@
+[package]
+name = "chacha20_u32_test"
+type = "bin"
+authors = ["TACEO"]
+
+[dependencies]
+chacha20 = { path = "../chacha20" }

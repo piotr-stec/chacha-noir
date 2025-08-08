@@ -1,0 +1,8 @@
+[package]
+name = "tlsn_decoder_circuit"
+type = "bin"
+authors = [""]
+compiler_version = ">=0.19.0"
+
+[dependencies]
+chacha20 = {path = "../chacha20"}
