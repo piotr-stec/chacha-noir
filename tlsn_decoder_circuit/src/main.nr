@@ -3,6 +3,7 @@ use dep::chacha20::chacha12_block;
 global BIT_ENCODING_SIZE: u32 = 16;
 global BYTE_ENCODING_SIZE: u32 = 128;
 global TWO_BYTE_ENCODING_SIZE: u32 = 256;
+global FOUR_BYTE_ENCODING_SIZE: u32 = 512;
 
 // Error types for decoding
 global DECODE_SUCCESS: u8 = 0;
@@ -176,6 +177,52 @@ fn generate_zero_encoding_multi_byte(
     result
 }
 
+// Generate zero-encoding for up to 4 bytes (512 bytes output)
+fn generate_zero_encoding_four_byte(
+    secret: DecoderSecret,
+    direction: u64,
+    range_start: u32,
+    byte_count: u32,
+) -> [u8; 512] {
+    let stream_id = direction;
+    let word_pos = (range_start * 32) as u64;
+
+    let mut result = [0; 512];
+
+    // Each byte needs 128 bytes of encoding, so 4 bytes need 512 bytes
+    // We need 8 ChaCha blocks (8 * 64 = 512 bytes)
+    let blocks_needed = (byte_count * 128 + 63) / 64; // Round up to nearest block
+
+    for block_idx in 0..8 {
+        // Max 8 blocks for 512 bytes
+        if block_idx < blocks_needed {
+            let state =
+                generate_chacha_state(secret.seed, stream_id, word_pos + (block_idx as u64 * 16));
+            let output = chacha12_block(state);
+
+            // Convert to bytes and store in result
+            for i in 0..16 {
+                let word = output[i];
+                let base_idx = block_idx * 64 + i * 4;
+                if base_idx < 512 {
+                    result[base_idx] = (word & 0xff) as u8;
+                    if base_idx + 1 < 512 {
+                        result[base_idx + 1] = ((word >> 8) & 0xff) as u8;
+                    }
+                    if base_idx + 2 < 512 {
+                        result[base_idx + 2] = ((word >> 16) & 0xff) as u8;
+                    }
+                    if base_idx + 3 < 512 {
+                        result[base_idx + 3] = ((word >> 24) & 0xff) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 // Decode a single bit from its 16-byte encoding
 fn decode_bit(zero_chunk: [u8; 16], encoded_chunk: [u8; 16], delta: [u8; 16]) -> (bool, u8) {
     // XOR encoded chunk with corresponding zero encoding
@@ -320,6 +367,59 @@ fn decode_data_multi_byte(
     result
 }
 
+// Decode up to 4 bytes from encoded data
+fn decode_data_four_byte(
+    secret: DecoderSecret,
+    direction: u64,
+    range_start: u32,
+    encoded_data: [u8; 512],
+    byte_count: u32,
+) -> [u8; 4] {
+    let zero_encoding =
+        generate_zero_encoding_four_byte(secret, direction, range_start, byte_count);
+
+    let mut result = [0; 4];
+
+    for byte_idx in 0..byte_count {
+        if byte_idx < 4 {
+            // Safety check
+            let mut decoded_bits = [false; 8];
+
+            // Decode each bit of this byte
+            for bit_idx in 0..8 {
+                let encoding_offset = byte_idx * 128; // Each byte uses 128 bytes
+                let start_pos = encoding_offset + bit_idx * BIT_ENCODING_SIZE;
+
+                // Extract 16-byte chunks
+                let mut zero_chunk = [0; 16];
+                let mut encoded_chunk = [0; 16];
+
+                for i in 0..16 {
+                    zero_chunk[i] = zero_encoding[(start_pos + i) as u32];
+                    encoded_chunk[i] = encoded_data[(start_pos + i) as u32];
+                }
+
+                let (bit_value, error_code) = decode_bit(zero_chunk, encoded_chunk, secret.delta);
+                assert(error_code == DECODE_SUCCESS);
+
+                decoded_bits[bit_idx] = bit_value;
+            }
+
+            // Convert bits to byte
+            let mut byte_value = 0;
+            for i in 0..8 {
+                if decoded_bits[i] {
+                    byte_value |= 1 << (i as u8);
+                }
+            }
+
+            result[byte_idx] = byte_value;
+        }
+    }
+
+    result
+}
+
 // Encode multiple bytes
 fn encode_data_multi_byte(
     secret: DecoderSecret,
@@ -334,6 +434,39 @@ fn encode_data_multi_byte(
     // Apply delta for each bit that is 1 in each byte
     for byte_idx in 0..byte_count {
         if byte_idx < 2 {
+            // Safety check
+            let byte_value = data[byte_idx];
+            let encoding_offset = byte_idx * 128; // Each byte uses 128 bytes
+
+            for bit_idx in 0..8 {
+                let bit = (byte_value >> bit_idx) & 1;
+                if bit == 1 {
+                    let encoding_start = encoding_offset + (bit_idx as u32) * BIT_ENCODING_SIZE;
+                    for i in 0..BIT_ENCODING_SIZE {
+                        encoded_data[(encoding_start + i) as u32] ^= secret.delta[i as u32];
+                    }
+                }
+            }
+        }
+    }
+
+    encoded_data
+}
+
+// Encode up to 4 bytes
+fn encode_data_four_byte(
+    secret: DecoderSecret,
+    direction: u64,
+    range_start: u32,
+    data: [u8; 4],
+    byte_count: u32,
+) -> [u8; 512] {
+    let mut encoded_data =
+        generate_zero_encoding_four_byte(secret, direction, range_start, byte_count);
+
+    // Apply delta for each bit that is 1 in each byte
+    for byte_idx in 0..byte_count {
+        if byte_idx < 4 {
             // Safety check
             let byte_value = data[byte_idx];
             let encoding_offset = byte_idx * 128; // Each byte uses 128 bytes
@@ -555,4 +688,50 @@ fn test_encode_decode_two_bytes() {
     // assert(decoded_data[0] == test_data[0]);
     // assert(decoded_data[1] == test_data[1]);
 
+}
+
+#[test]
+fn test_encode_decode_four_bytes() {
+    let secret = DecoderSecret { seed: [42; 32], delta: [13; 16] };
+    let direction = 0;
+    let position = 0;
+    let test_data = [170, 69, 46, 56]; // 4 bajty do zakodowania
+
+    // Enkoduj dane
+    let encoded_data = encode_data_four_byte(secret, direction, position, test_data, 4);
+
+    // Dekoduj z powrotem
+    let decoded_data = decode_data_four_byte(secret, direction, position, encoded_data, 4);
+
+    let expected_encoded = [
+        27, 140, 32, 205, 226, 219, 180, 60, 211, 199, 9, 178, 144, 172, 80, 220, 223, 179, 39, 138,
+        174, 175, 72, 73, 184, 168, 29, 150, 202, 99, 170, 246, 7, 166, 101, 241, 82, 145, 64, 12,
+        189, 34, 235, 74, 211, 244, 219, 114, 240, 84, 48, 236, 54, 187, 70, 11, 124, 243, 31, 90,
+        92, 119, 238, 176, 240, 200, 57, 15, 100, 108, 176, 16, 205, 59, 99, 198, 124, 16, 23, 190,
+        173, 184, 172, 126, 94, 186, 38, 58, 47, 216, 45, 34, 205, 185, 102, 111, 16, 120, 212, 254,
+        210, 138, 180, 38, 239, 244, 74, 125, 118, 167, 76, 234, 127, 80, 239, 197, 114, 79, 47,
+        241, 195, 140, 113, 102, 60, 240, 29, 78, 10, 64, 248, 78, 147, 51, 101, 218, 144, 29, 225,
+        9, 229, 63, 12, 111, 195, 17, 143, 65, 113, 221, 236, 68, 151, 245, 107, 9, 102, 161, 98,
+        118, 242, 8, 180, 210, 36, 177, 6, 143, 37, 71, 171, 121, 183, 94, 143, 238, 207, 150, 139,
+        17, 27, 42, 86, 162, 215, 222, 192, 48, 132, 242, 87, 56, 94, 52, 213, 177, 12, 200, 174,
+        217, 65, 83, 242, 117, 42, 161, 201, 167, 154, 154, 113, 53, 143, 192, 255, 14, 34, 249,
+        140, 175, 161, 9, 43, 239, 163, 25, 157, 119, 142, 228, 162, 225, 207, 116, 86, 198, 85,
+        140, 19, 1, 243, 27, 157, 26, 7, 202, 246, 246, 190, 72, 228, 210, 232, 111, 206, 136, 178,
+        228, 133, 125, 65, 107, 38, 113, 162, 22, 50, 203, 40, 130, 32, 103, 161, 11, 94, 56, 13,
+        176, 215, 89, 185, 34, 18, 166, 189, 30, 253, 69, 145, 167, 209, 193, 32, 155, 90, 234, 179,
+        32, 74, 80, 50, 176, 8, 19, 99, 83, 208, 202, 54, 4, 83, 132, 136, 97, 197, 42, 145, 165,
+        33, 226, 151, 69, 121, 161, 81, 145, 103, 95, 28, 214, 35, 14, 234, 176, 56, 16, 135, 218,
+        179, 86, 128, 37, 110, 96, 31, 159, 134, 244, 175, 125, 164, 238, 102, 29, 62, 154, 200, 30,
+        49, 253, 112, 180, 8, 0, 134, 137, 120, 201, 121, 116, 167, 247, 58, 218, 237, 116, 130,
+        232, 101, 134, 85, 200, 35, 69, 45, 182, 224, 61, 200, 133, 201, 223, 126, 145, 215, 175,
+        135, 246, 57, 224, 168, 128, 18, 213, 119, 140, 251, 146, 167, 18, 244, 81, 253, 161, 148,
+        183, 120, 202, 120, 1, 72, 57, 147, 154, 42, 46, 74, 4, 219, 153, 167, 146, 195, 25, 117,
+        125, 51, 181, 236, 204, 235, 121, 130, 155, 142, 4, 51, 65, 188, 162, 71, 26, 117, 203, 83,
+        215, 249, 118, 108, 137, 184, 156, 22, 212, 218, 206, 98, 68, 20, 29, 100, 136, 47, 87, 91,
+        120, 158, 199, 97, 109, 252, 194, 144, 220, 212, 168, 234, 82, 233, 49, 199, 128, 244, 27,
+        93, 77, 198, 104, 185, 225, 140, 214, 83, 83, 249, 191, 190, 234, 205, 221, 42, 254,
+    ];
+
+    assert(expected_encoded == encoded_data);
+    assert(decoded_data == test_data);
 }
