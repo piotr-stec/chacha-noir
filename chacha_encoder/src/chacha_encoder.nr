@@ -71,7 +71,7 @@ fn generate_chacha_state(seed: [u8; 32], stream_id: u64, word_pos: u64) -> [u32;
 
 
 // Function to create a new array with 16 additional elements from provided array
-fn add_sixteen_elements<let INPUT_SIZE: u32>(
+pub fn add_sixteen_elements<let INPUT_SIZE: u32>(
     input: [u8; INPUT_SIZE],
     additional_elements: [u8; 16],
 ) -> [u8; INPUT_SIZE + 16] {
@@ -95,10 +95,10 @@ fn add_sixteen_elements<let INPUT_SIZE: u32>(
 // Generate zero-encoding for up to 11 bytes (1408 bytes output)
 fn generate_zero_encoding_generic_byte<let INPUT_SIZE: u32>(
     secret: EncoderSecret,
-    direction: u64,
+    direction: u8,
     range_start: u32,
 ) -> [u8; INPUT_SIZE * 128] {
-    let stream_id = direction;
+    let stream_id = direction as u64;
     let word_pos = (range_start * 32) as u64;
 
     let mut result = [0; INPUT_SIZE * 128];
@@ -142,7 +142,7 @@ fn generate_zero_encoding_generic_byte<let INPUT_SIZE: u32>(
 // Encode up to 11 bytes
 pub fn encode_data_generic_byte<let INPUT_SIZE: u32>(
     secret: EncoderSecret,
-    direction: u64,
+    direction: u8,
     range_start: u32,
     data: [u8; INPUT_SIZE],
 ) -> [u8; INPUT_SIZE * 128] {
