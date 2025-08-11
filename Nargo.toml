@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "chacha20",
+    "chacha_encoder",
+    "chacha20_bitwise_test",
+    "chacha20_bitwise_field_test", 
+    "chacha20_u32_test"
+]
