@@ -92,7 +92,6 @@ pub fn add_sixteen_elements<let INPUT_SIZE: u32>(
     result
 }
 
-// Generate zero-encoding for up to 11 bytes (1408 bytes output)
 fn generate_zero_encoding_generic_byte<let INPUT_SIZE: u32>(
     secret: EncoderSecret,
     direction: u8,
@@ -105,8 +104,6 @@ fn generate_zero_encoding_generic_byte<let INPUT_SIZE: u32>(
 
     let result_len = result.len() as u32;
 
-    // Each byte needs 128 bytes of encoding, so 11 bytes need 1408 bytes
-    // We need 22 ChaCha blocks (22 * 64 = 1408 bytes)
     let blocks_needed = (INPUT_SIZE * 128 + 63) / 64; // Round up to nearest block
 
     for block_idx in 0..INPUT_SIZE * 2 {
@@ -151,7 +148,7 @@ pub fn encode_data_generic_byte<let INPUT_SIZE: u32>(
 
     // Apply delta for each bit that is 1 in each byte
     for byte_idx in 0..INPUT_SIZE {
-        if byte_idx < 11 {
+        if byte_idx < INPUT_SIZE {
             // Safety check
             let byte_value = data[byte_idx];
             let encoding_offset = byte_idx * 128; // Each byte uses 128 bytes
