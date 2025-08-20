@@ -179,50 +179,97 @@ pub fn encode_data_generic_byte<let INPUT_SIZE: u32>(
     encoded_data
 }
 
-pub fn encode_data_memory_optimized<let INPUT_SIZE: u32>(
+pub fn encode_single_byte_streaming(
     secret: EncoderSecret,
     direction: u8,
     range_start: u32,
-    data: [u8; INPUT_SIZE],
-) -> [u8; INPUT_SIZE * 128] {
-    let mut encoded_data = [0u8; INPUT_SIZE * 128];
+    byte_value: u8,
+    byte_position: u32,
+) -> [u8; 128] {
+    let mut encoded_byte = [0u8; 128];
     let mut current_block = [0u8; 64];
     let mut current_block_idx = 0xffffffff;
     
-    for byte_idx in 0..INPUT_SIZE {
-        let byte_value = data[byte_idx];
-        let encoding_offset = byte_idx * 128;
+    for bit_idx in 0..8 {
+        let bit = (byte_value >> bit_idx) & 1;
+        let bit_start = (bit_idx as u32) * BIT_ENCODING_SIZE;
         
-        for bit_idx in 0..8 {
-            let bit = (byte_value >> bit_idx) & 1;
-            let bit_start = encoding_offset + (bit_idx as u32) * BIT_ENCODING_SIZE;
+        let global_bit_pos = byte_position * 8 + bit_idx as u32;
+        let keystream_start = global_bit_pos * BIT_ENCODING_SIZE;
+        let block_idx = keystream_start / 64;
+        let block_offset = keystream_start % 64;
+        
+        if block_idx != current_block_idx {
+            current_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+            current_block_idx = block_idx;
+        }
+        
+        for i in 0..BIT_ENCODING_SIZE {
+            let keystream_byte = if block_offset + i < 64 {
+                current_block[block_offset + i]
+            } else {
+                let next_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx + 1);
+                next_block[(block_offset + i) - 64]
+            };
             
-            let global_bit_pos = byte_idx * 8 + bit_idx as u32;
-            let keystream_start = global_bit_pos * BIT_ENCODING_SIZE;
-            let block_idx = keystream_start / 64;
-            let block_offset = keystream_start % 64;
-            
-            if block_idx != current_block_idx {
-                current_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
-                current_block_idx = block_idx;
-            }
-            
-            for i in 0..BIT_ENCODING_SIZE {
-                let keystream_byte = if block_offset + i < 64 {
-                    current_block[block_offset + i]
-                } else {
-                    let next_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx + 1);
-                    next_block[(block_offset + i) - 64]
-                };
-                
-                encoded_data[bit_start + i] = if bit == 1 {
-                    keystream_byte ^ secret.delta[i]
-                } else {
-                    keystream_byte
-                };
-            }
+            encoded_byte[bit_start + i] = if bit == 1 {
+                keystream_byte ^ secret.delta[i]
+            } else {
+                keystream_byte
+            };
         }
     }
     
-    encoded_data
+    encoded_byte
+}
+
+pub fn encode_bit_on_demand(
+    secret: EncoderSecret,
+    direction: u8,
+    range_start: u32,
+    byte_position: u32,
+    bit_position: u32,
+    bit_value: u8,
+) -> [u8; 16] {
+    let global_bit_pos = byte_position * 8 + bit_position;
+    let keystream_start = global_bit_pos * BIT_ENCODING_SIZE;
+    let block_idx = keystream_start / 64;
+    let block_offset = keystream_start % 64;
+    
+    let mut result = [0u8; 16];
+    
+    if block_offset + BIT_ENCODING_SIZE <= 64 {
+        let block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+        for i in 0..BIT_ENCODING_SIZE {
+            let keystream_byte = block[block_offset + i];
+            result[i] = if bit_value == 1 {
+                keystream_byte ^ secret.delta[i]
+            } else {
+                keystream_byte
+            };
+        }
+    } else {
+        let first_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+        let second_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx + 1);
+        
+        let first_part_size = 64 - block_offset;
+        for i in 0..first_part_size {
+            let keystream_byte = first_block[block_offset + i];
+            result[i] = if bit_value == 1 {
+                keystream_byte ^ secret.delta[i]
+            } else {
+                keystream_byte
+            };
+        }
+        for i in 0..(BIT_ENCODING_SIZE - first_part_size) {
+            let keystream_byte = second_block[i];
+            result[first_part_size + i] = if bit_value == 1 {
+                keystream_byte ^ secret.delta[first_part_size + i]
+            } else {
+                keystream_byte
+            };
+        }
+    }
+    
+    result
 }
