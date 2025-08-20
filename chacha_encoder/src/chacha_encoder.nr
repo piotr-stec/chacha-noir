@@ -2,6 +2,7 @@ use dep::chacha20::chacha12_block;
 
 global BIT_ENCODING_SIZE: u32 = 16;
 
+
 pub struct EncoderSecret {
     seed: [u8; 32],
     delta: [u8; 16],
@@ -68,22 +69,16 @@ fn generate_chacha_state(seed: [u8; 32], stream_id: u64, word_pos: u64) -> [u32;
     ]
 }
 
-
-// Function to create a new array with 16 additional elements from provided array
 pub fn add_sixteen_elements<let INPUT_SIZE: u32>(
     input: [u8; INPUT_SIZE],
     additional_elements: [u8; 16],
 ) -> [u8; INPUT_SIZE + 16] {
-    // Verify that OUTPUT_SIZE = INPUT_SIZE + 16
-
     let mut result = [0; INPUT_SIZE + 16];
 
-    // Copy original data
     for i in 0..INPUT_SIZE {
         result[i] = input[i];
     }
 
-    // Add the 16 additional elements at the end
     for i in 0..16 {
         result[INPUT_SIZE + i] = additional_elements[i];
     }
@@ -91,79 +86,143 @@ pub fn add_sixteen_elements<let INPUT_SIZE: u32>(
     result
 }
 
-fn generate_zero_encoding_generic_byte<let INPUT_SIZE: u32>(
+fn generate_chacha_block_at_position(
     secret: EncoderSecret,
     direction: u8,
     range_start: u32,
-) -> [u8; INPUT_SIZE * 128] {
+    block_idx: u32,
+) -> [u8; 64] {
     let stream_id = direction as u64;
     let word_pos = (range_start * 32) as u64;
-
-    let mut result = [0; INPUT_SIZE * 128];
-
-    let result_len = result.len() as u32;
-
-    let blocks_needed = (INPUT_SIZE * 128 + 63) / 64; // Round up to nearest block
-
-    for block_idx in 0..INPUT_SIZE * 2 {
-        // Max 22 blocks for 1408 bytes
-        if block_idx < blocks_needed {
-            let state =
-                generate_chacha_state(secret.seed, stream_id, word_pos + (block_idx as u64 * 16));
-            let output = chacha12_block(state);
-
-            // Convert to bytes and store in result
-            for i in 0..16 {
-                let word = output[i];
-                let base_idx = block_idx * 64 + i * 4;
-                if base_idx < result_len {
-                    result[base_idx] = (word & 0xff) as u8;
-                    if base_idx + 1 < result_len {
-                        result[base_idx + 1] = ((word >> 8) & 0xff) as u8;
-                    }
-                    if base_idx + 2 < result_len {
-                        result[base_idx + 2] = ((word >> 16) & 0xff) as u8;
-                    }
-                    if base_idx + 3 < result_len {
-                        result[base_idx + 3] = ((word >> 24) & 0xff) as u8;
-                    }
-                }
-            }
-        }
+    
+    let state = generate_chacha_state(secret.seed, stream_id, word_pos + (block_idx as u64 * 16));
+    let output = chacha12_block(state);
+    
+    let mut result = [0u8; 64];
+    for i in 0..16 {
+        let word = output[i];
+        let base_idx = i * 4;
+        result[base_idx] = (word & 0xff) as u8;
+        result[base_idx + 1] = ((word >> 8) & 0xff) as u8;
+        result[base_idx + 2] = ((word >> 16) & 0xff) as u8;
+        result[base_idx + 3] = ((word >> 24) & 0xff) as u8;
     }
-
+    
     result
 }
 
-// Encode up to 11 bytes
+fn get_keystream_bytes_for_bit(
+    secret: EncoderSecret,
+    direction: u8,
+    range_start: u32,
+    byte_idx: u32,
+    bit_idx: u32,
+) -> [u8; 16] {
+    let global_bit_pos = byte_idx * 8 + bit_idx;
+    let keystream_start = global_bit_pos * BIT_ENCODING_SIZE;
+    
+    let block_idx = keystream_start / 64;
+    let block_offset = keystream_start % 64;
+    
+    let mut result = [0u8; 16];
+    
+    if block_offset + BIT_ENCODING_SIZE <= 64 {
+        let block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+        for i in 0..BIT_ENCODING_SIZE {
+            result[i] = block[block_offset + i];
+        }
+    } else {
+        let first_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+        let second_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx + 1);
+        
+        let first_part_size = 64 - block_offset;
+        for i in 0..first_part_size {
+            result[i] = first_block[block_offset + i];
+        }
+        for i in 0..(BIT_ENCODING_SIZE - first_part_size) {
+            result[first_part_size + i] = second_block[i];
+        }
+    }
+    
+    result
+}
+
 pub fn encode_data_generic_byte<let INPUT_SIZE: u32>(
     secret: EncoderSecret,
     direction: u8,
     range_start: u32,
     data: [u8; INPUT_SIZE],
 ) -> [u8; INPUT_SIZE * 128] {
-    let mut encoded_data =
-        generate_zero_encoding_generic_byte::<INPUT_SIZE>(secret, direction, range_start);
-
-    // Apply delta for each bit that is 1 in each byte
+    let mut encoded_data = [0u8; INPUT_SIZE * 128];
+    
     for byte_idx in 0..INPUT_SIZE {
-        if byte_idx < INPUT_SIZE {
-            // Safety check
-            let byte_value = data[byte_idx];
-            let encoding_offset = byte_idx * 128; // Each byte uses 128 bytes
-
-            for bit_idx in 0..8 {
-                let bit = (byte_value >> bit_idx) & 1;
-                if bit == 1 {
-                    let encoding_start = encoding_offset + (bit_idx as u32) * BIT_ENCODING_SIZE;
-                    for i in 0..BIT_ENCODING_SIZE {
-                        encoded_data[(encoding_start + i) as u32] ^= secret.delta[i as u32];
-                    }
-                }
+        let byte_value = data[byte_idx];
+        let encoding_offset = byte_idx * 128;
+        
+        for bit_idx in 0..8 {
+            let bit = (byte_value >> bit_idx) & 1;
+            let bit_start = encoding_offset + (bit_idx as u32) * BIT_ENCODING_SIZE;
+            
+            let keystream = get_keystream_bytes_for_bit(secret, direction, range_start, byte_idx, bit_idx as u32);
+            
+            for i in 0..BIT_ENCODING_SIZE {
+                let keystream_byte = keystream[i];
+                encoded_data[bit_start + i] = if bit == 1 {
+                    keystream_byte ^ secret.delta[i]
+                } else {
+                    keystream_byte
+                };
             }
         }
     }
-
+    
     encoded_data
 }
 
+pub fn encode_data_memory_optimized<let INPUT_SIZE: u32>(
+    secret: EncoderSecret,
+    direction: u8,
+    range_start: u32,
+    data: [u8; INPUT_SIZE],
+) -> [u8; INPUT_SIZE * 128] {
+    let mut encoded_data = [0u8; INPUT_SIZE * 128];
+    let mut current_block = [0u8; 64];
+    let mut current_block_idx = 0xffffffff;
+    
+    for byte_idx in 0..INPUT_SIZE {
+        let byte_value = data[byte_idx];
+        let encoding_offset = byte_idx * 128;
+        
+        for bit_idx in 0..8 {
+            let bit = (byte_value >> bit_idx) & 1;
+            let bit_start = encoding_offset + (bit_idx as u32) * BIT_ENCODING_SIZE;
+            
+            let global_bit_pos = byte_idx * 8 + bit_idx as u32;
+            let keystream_start = global_bit_pos * BIT_ENCODING_SIZE;
+            let block_idx = keystream_start / 64;
+            let block_offset = keystream_start % 64;
+            
+            if block_idx != current_block_idx {
+                current_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx);
+                current_block_idx = block_idx;
+            }
+            
+            for i in 0..BIT_ENCODING_SIZE {
+                let keystream_byte = if block_offset + i < 64 {
+                    current_block[block_offset + i]
+                } else {
+                    let next_block = generate_chacha_block_at_position(secret, direction, range_start, block_idx + 1);
+                    next_block[(block_offset + i) - 64]
+                };
+                
+                encoded_data[bit_start + i] = if bit == 1 {
+                    keystream_byte ^ secret.delta[i]
+                } else {
+                    keystream_byte
+                };
+            }
+        }
+    }
+    
+    encoded_data
+}
